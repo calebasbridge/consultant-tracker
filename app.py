@@ -31,8 +31,12 @@ def get_time_usage():
     """Calculate billed vs unbilled usage for the dashboard."""
     response = supabase.table("time_entries").select("project_id, hours, billed").execute()
     df = pd.DataFrame(response.data)
+    
+    # FIX: Strictly define types for empty dataframe to prevent FutureWarning
     if df.empty:
-        return pd.DataFrame(columns=["project_id", "total_hours", "unbilled_hours"])
+        return pd.DataFrame(columns=["project_id", "total_hours", "unbilled_hours"]).astype(
+            {"project_id": "object", "total_hours": float, "unbilled_hours": float}
+        )
     
     df["hours"] = pd.to_numeric(df["hours"])
     total_usage = df.groupby("project_id")["hours"].sum().reset_index().rename(columns={"hours": "total_hours"})
@@ -145,6 +149,16 @@ def update_project(project_id, updates):
         return True
     except Exception as e:
         st.error(f"Error updating project: {e}")
+        return False
+
+def create_purchase_order(project_id, po_number):
+    try:
+        supabase.table("purchase_orders").insert({"project_id": project_id, "po_number": po_number}).execute()
+        st.success(f"✅ PO '{po_number}' added successfully!")
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Error adding PO: {e}")
         return False
 
 # --- 3. MAIN UI LAYOUT ---
@@ -391,7 +405,8 @@ with tab_manage:
     all_projects_response = supabase.table("projects").select("*, clients(name)").order("name").execute()
     all_projects_df = pd.DataFrame(all_projects_response.data)
 
-    tab_create, tab_edit = st.tabs(["New Project", "Edit / Archive"])
+    # UPDATED: Added "Manage POs" to the list
+    tab_create, tab_edit, tab_po = st.tabs(["New Project", "Edit / Archive", "Manage POs"])
 
     # SUB-TAB: CREATE
     with tab_create:
@@ -463,3 +478,38 @@ with tab_manage:
                     update_project(proj_data['id'], updates)
         else:
             st.info("No projects found.")
+
+    # SUB-TAB: PURCHASE ORDERS (New!)
+    with tab_po:
+        st.subheader("Manage Purchase Orders (Sub-Projects)")
+        if not all_projects_df.empty:
+            # Re-use the display logic from Edit tab
+            all_projects_df["display_name"] = all_projects_df.apply(
+                lambda x: f"{x['clients']['name']} | {x['name']}", axis=1
+            )
+            po_proj_map = {row['display_name']: row['id'] for i, row in all_projects_df.iterrows()}
+            
+            selected_po_proj_label = st.selectbox("Select Project", options=list(po_proj_map.keys()), key="po_proj_select")
+            selected_po_proj_id = po_proj_map[selected_po_proj_label]
+            
+            # Show existing POs
+            current_pos = fetch_pos_for_project(selected_po_proj_id)
+            if current_pos:
+                st.write("**Existing POs:**")
+                for po in current_pos:
+                    st.text(f"• {po['po_number']}")
+            else:
+                st.info("No POs assigned to this project yet.")
+            
+            st.write("---")
+            
+            # Add New PO Form
+            with st.form("add_po_form"):
+                new_po_num = st.text_input("New PO Number / Name", placeholder="e.g. PO #123456 or 'Training Budget'")
+                if st.form_submit_button("Add Purchase Order"):
+                    if new_po_num:
+                        create_purchase_order(selected_po_proj_id, new_po_num)
+                    else:
+                        st.error("Please enter a PO Number.")
+        else:
+            st.info("Create a project first.")
