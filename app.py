@@ -169,7 +169,7 @@ with tab_entry:
     if not daily_df.empty:
         total_day_hours = daily_df["hours"].sum()
         st.info(f"📅 **Total Logged for {date_input.strftime('%b %d')}:** {total_day_hours:.2f} Hours ({total_day_hours/8.0:.2f} Days)")
-        st.dataframe(daily_df.style.format({"hours": "{:.2f}"}), width="stretch", hide_index=True)
+        st.dataframe(daily_df.style.format({"hours": "{:.2f}"}), width=None, hide_index=True, use_container_width=True)
     else:
         st.caption(f"No entries logged for {date_input.strftime('%b %d')} yet.")
     
@@ -199,6 +199,8 @@ with tab_entry:
                 if hours_input <= 0: st.error("Validation Error: Hours must be greater than 0.")
                 elif not desc_input.strip(): st.error("Validation Error: Please provide a description.")
                 else: submit_time_entry(selected_project_id, selected_po_id, date_input, desc_input, hours_input)
+    else:
+        st.warning("No active projects found. Please go to the 'Manage' tab to add a project.")
 
 # --- TAB 2: DASHBOARD ---
 with tab_dashboard:
@@ -254,22 +256,34 @@ with tab_dashboard:
 with tab_invoice:
     st.header("Generate Invoice")
     col1, col2 = st.columns(2)
+    
+    # 1. Fetch Projects & Handle Empty State safely
+    inv_projects_df = get_active_projects()
+    inv_project_id = None
+    
     with col1:
-        inv_projects_df = get_active_projects()
-        inv_project_options = {f"{row['clients']['name']} | {row['name']}": row['id'] for index, row in inv_projects_df.iterrows()}
-        inv_selected_label = st.selectbox("Select Project for Invoice", options=list(inv_project_options.keys()))
-        inv_project_id = inv_project_options[inv_selected_label]
+        if inv_projects_df.empty:
+            st.warning("No active projects found. Please create one in the 'Manage' tab.")
+            inv_selected_label = None
+        else:
+            inv_project_options = {f"{row['clients']['name']} | {row['name']}": row['id'] for index, row in inv_projects_df.iterrows()}
+            inv_selected_label = st.selectbox("Select Project for Invoice", options=list(inv_project_options.keys()))
+            if inv_selected_label:
+                inv_project_id = inv_project_options[inv_selected_label]
+                
         qb_invoice_num = st.text_input("QuickBooks Invoice #", placeholder="e.g. 1099")
+
     with col2:
         date_range = st.date_input("Select Date Range", value=(date.today().replace(day=1), date.today()))
 
-    if isinstance(date_range, tuple) and len(date_range) == 2:
+    # 2. Proceed only if we have a valid project ID
+    if inv_project_id and isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = date_range
         preview_df = fetch_invoice_preview(inv_project_id, start_date, end_date)
         
         if not preview_df.empty:
             preview_df["PO"] = preview_df["purchase_orders"].apply(lambda x: x.get("po_number", "General") if isinstance(x, dict) else "General")
-            st.dataframe(preview_df[["date_worked", "description", "PO", "hours"]], width="stretch")
+            st.dataframe(preview_df[["date_worked", "description", "PO", "hours"]], use_container_width=True)
             
             total_inv_hours = preview_df["hours"].sum()
             
@@ -361,8 +375,7 @@ with tab_finance:
                 st.markdown("#### Breakdown by Project")
                 summary = filtered_df.groupby("Project")[["Hours", "Amount"]].sum().reset_index()
                 summary["Amount"] = summary["Amount"].apply(lambda x: f"${x:,.2f}") 
-                # REVISION: Fixed deprecated parameter
-                st.dataframe(summary, width="stretch")
+                st.dataframe(summary, use_container_width=True)
             else:
                 st.warning("No projects selected.")
             
