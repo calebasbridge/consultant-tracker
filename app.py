@@ -15,7 +15,12 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-# --- 2. DATA FETCHING FUNCTIONS ---
+# Initialize Session State for Editing functionality
+if "editing_entry_id" not in st.session_state:
+    st.session_state.editing_entry_id = None
+    st.session_state.edit_data = {}
+
+# --- 2. DATA FETCHING & MUTATION FUNCTIONS ---
 
 def get_active_projects():
     """Fetch active projects with client names."""
@@ -32,7 +37,6 @@ def get_time_usage():
     response = supabase.table("time_entries").select("project_id, hours, billed").execute()
     df = pd.DataFrame(response.data)
     
-    # FIX: Strictly define types for empty dataframe to prevent FutureWarning
     if df.empty:
         return pd.DataFrame(columns=["project_id", "total_hours", "unbilled_hours"]).astype(
             {"project_id": "object", "total_hours": float, "unbilled_hours": float}
@@ -61,9 +65,29 @@ def submit_time_entry(project_id, po_id, date_worked, description, hours):
     except Exception as e:
         st.error(f"Database Error: {e}")
 
+def update_time_entry(entry_id, updates):
+    """Updates an existing time entry in Supabase."""
+    try:
+        supabase.table("time_entries").update(updates).eq("id", entry_id).execute()
+        st.cache_data.clear() 
+        return True
+    except Exception as e:
+        st.error(f"Database Error: {e}")
+        return False
+
+def delete_time_entry(entry_id):
+    """Permanently deletes an unbilled time entry."""
+    try:
+        supabase.table("time_entries").delete().eq("id", entry_id).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Error deleting entry: {e}")
+        return False
+
 def get_entries_by_date(target_date):
     """Fetches entries for a specific date (Daily Snapshot)."""
-    # Nested select to handle the Client -> Project -> Entry relationship
+    # Updated to include IDs and billed status for Edit/Delete logic
     response = supabase.table("time_entries")\
         .select("*, projects(name, clients(name)), purchase_orders(po_number)")\
         .eq("date_worked", str(target_date))\
@@ -74,7 +98,7 @@ def get_entries_by_date(target_date):
         df["Project"] = df["projects"].apply(lambda x: x.get("name") if x else "")
         df["Client"] = df["projects"].apply(lambda x: x.get("clients", {}).get("name") if x and x.get("clients") else "")
         df["PO"] = df["purchase_orders"].apply(lambda x: x.get("po_number") if x else "N/A")
-        return df[["Client", "Project", "PO", "description", "hours"]]
+        return df
     return pd.DataFrame()
 
 def get_revenue_projection(start_date, end_date):
@@ -173,48 +197,103 @@ with tab_entry:
     st.header("Day Sheet")
     projects_df = get_active_projects()
     
-    # REVISION: Reactive Date Picker
     c1, c2 = st.columns([1, 2])
     with c1:
         date_input = st.date_input("Select Date", value=date.today())
+        if st.session_state.editing_entry_id:
+            st.warning("⚠️ Edit in progress. Save or Cancel before changing dates.")
     
-    # REVISION: Daily Snapshot with "width" fixed
+    # Daily Snapshot with Edit/Delete buttons
     daily_df = get_entries_by_date(date_input)
     if not daily_df.empty:
         total_day_hours = daily_df["hours"].sum()
         st.info(f"📅 **Total Logged for {date_input.strftime('%b %d')}:** {total_day_hours:.2f} Hours ({total_day_hours/8.0:.2f} Days)")
-        st.dataframe(daily_df.style.format({"hours": "{:.2f}"}), width=None, hide_index=True, use_container_width=True)
+        
+        for _, row in daily_df.iterrows():
+            col_info, col_edit, col_del = st.columns([0.7, 0.15, 0.15])
+            with col_info:
+                st.write(f"**{row['Project']}**: {row['description']} ({row['hours']} hrs)")
+            
+            with col_edit:
+                if not row['billed']:
+                    if st.button("📝", key=f"edit_{row['id']}", help="Edit Entry"):
+                        st.session_state.editing_entry_id = row['id']
+                        st.session_state.edit_data = row.to_dict()
+                        st.rerun()
+                else:
+                    st.caption("🔒 Billed")
+
+            with col_del:
+                if not row['billed']:
+                    if st.button("🗑️", key=f"del_{row['id']}", help="Delete Entry"):
+                        if delete_time_entry(row['id']):
+                            st.rerun()
     else:
         st.caption(f"No entries logged for {date_input.strftime('%b %d')} yet.")
     
     st.write("---")
     
+    # ENTRY / EDIT FORM
     if not projects_df.empty:
         project_options = {f"{row['clients']['name']} | {row['name']}": row['id'] for index, row in projects_df.iterrows()}
-        selected_project_label = st.selectbox("Select Project", options=list(project_options.keys()))
-        selected_project_id = project_options[selected_project_label]
         
-        pos = fetch_pos_for_project(selected_project_id)
-        po_options = {p['po_number']: p['id'] for p in pos} if pos else {"N/A": None}
-        if pos: po_options["General / No PO"] = None
+        is_editing = st.session_state.editing_entry_id is not None
+        edit_vals = st.session_state.edit_data
+        
+        st.subheader("✏️ Edit Entry" if is_editing else "➕ Log New Time")
 
         with st.form("time_entry_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
+                # Find index of current project if editing
+                default_ix = 0
+                if is_editing:
+                    proj_label = f"{edit_vals['Client']} | {edit_vals['Project']}"
+                    if proj_label in project_options:
+                        default_ix = list(project_options.keys()).index(proj_label)
+                
+                selected_project_label = st.selectbox("Select Project", options=list(project_options.keys()), index=default_ix)
+                selected_project_id = project_options[selected_project_label]
+                
+                pos = fetch_pos_for_project(selected_project_id)
+                po_options = {p['po_number']: p['id'] for p in pos} if pos else {"N/A": None}
+                if pos: po_options["General / No PO"] = None
+                
                 selected_po_label = st.selectbox("Purchase Order (PO)", options=list(po_options.keys()))
                 selected_po_id = po_options[selected_po_label]
+
             with col2:
-                hours_input = st.number_input("Hours Worked", min_value=0.0, step=0.25, format="%.2f")
+                default_hours = float(edit_vals.get('hours', 0.0)) if is_editing else 0.0
+                hours_input = st.number_input("Hours Worked", min_value=0.0, step=0.25, format="%.2f", value=default_hours)
+                
+                default_desc = edit_vals.get('description', "") if is_editing else ""
+                desc_input = st.text_input("Description", value=default_desc, placeholder="e.g., Q3 Strategic Planning Meeting")
             
-            desc_input = st.text_input("Description", placeholder="e.g., Q3 Strategic Planning Meeting")
-            
-            submitted = st.form_submit_button("Submit Time Entry")
+            c_btn1, c_btn2 = st.columns([0.3, 0.7])
+            with c_btn1:
+                submitted = st.form_submit_button("Update Entry" if is_editing else "Submit Time Entry")
+            with c_btn2:
+                if is_editing:
+                    if st.form_submit_button("❌ Cancel Edit"):
+                        st.session_state.editing_entry_id = None
+                        st.session_state.edit_data = {}
+                        st.rerun()
+
             if submitted:
-                if hours_input <= 0: st.error("Validation Error: Hours must be greater than 0.")
-                elif not desc_input.strip(): st.error("Validation Error: Please provide a description.")
-                else: submit_time_entry(selected_project_id, selected_po_id, date_input, desc_input, hours_input)
+                if hours_input <= 0: st.error("Hours must be greater than 0.")
+                elif not desc_input.strip(): st.error("Please provide a description.")
+                else:
+                    if is_editing:
+                        updates = {"project_id": selected_project_id, "po_id": selected_po_id, "hours": hours_input, "description": desc_input}
+                        if update_time_entry(st.session_state.editing_entry_id, updates):
+                            st.session_state.editing_entry_id = None
+                            st.session_state.edit_data = {}
+                            st.success("Entry Updated!")
+                            st.rerun()
+                    else:
+                        submit_time_entry(selected_project_id, selected_po_id, date_input, desc_input, hours_input)
     else:
-        st.warning("No active projects found. Please go to the 'Manage' tab to add a project.")
+        st.warning("No active projects found. Please go to the 'Manage' tab.")
 
 # --- TAB 2: DASHBOARD ---
 with tab_dashboard:
@@ -271,13 +350,12 @@ with tab_invoice:
     st.header("Generate Invoice")
     col1, col2 = st.columns(2)
     
-    # 1. Fetch Projects & Handle Empty State safely
     inv_projects_df = get_active_projects()
     inv_project_id = None
     
     with col1:
         if inv_projects_df.empty:
-            st.warning("No active projects found. Please create one in the 'Manage' tab.")
+            st.warning("No active projects found.")
             inv_selected_label = None
         else:
             inv_project_options = {f"{row['clients']['name']} | {row['name']}": row['id'] for index, row in inv_projects_df.iterrows()}
@@ -290,7 +368,6 @@ with tab_invoice:
     with col2:
         date_range = st.date_input("Select Date Range", value=(date.today().replace(day=1), date.today()))
 
-    # 2. Proceed only if we have a valid project ID
     if inv_project_id and isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = date_range
         preview_df = fetch_invoice_preview(inv_project_id, start_date, end_date)
@@ -300,8 +377,6 @@ with tab_invoice:
             st.dataframe(preview_df[["date_worked", "description", "PO", "hours"]], use_container_width=True)
             
             total_inv_hours = preview_df["hours"].sum()
-            
-            # REVISION: Rounded to 2 decimal places
             st.metric("Total Invoice Days", f"{total_inv_hours / 8.0:.2f} Days")
             
             st.write("---")
@@ -310,16 +385,9 @@ with tab_invoice:
                     st.error("Please enter a QuickBooks Invoice # first.")
                 else:
                     proj_data = inv_projects_df[inv_projects_df['id'] == inv_project_id].iloc[0]
-                    
-                    history_response = supabase.table("time_entries") \
-                        .select("hours") \
-                        .eq("project_id", inv_project_id) \
-                        .eq("billed", True) \
-                        .execute()
-                    
+                    history_response = supabase.table("time_entries").select("hours").eq("project_id", inv_project_id).eq("billed", True).execute()
                     prior_hours = sum([item['hours'] for item in history_response.data])
                     prior_days = prior_hours / 8.0
-                    
                     line_items = preview_df.to_dict('records')
                     
                     pdf_bytes = generate_invoice_pdf(
@@ -336,26 +404,20 @@ with tab_invoice:
                         line_items=line_items
                     )
                     
-                    st.download_button(
-                        label="⬇️ Download PDF",
-                        data=pdf_bytes,
-                        file_name=f"Invoice_{qb_invoice_num}.pdf",
-                        mime="application/pdf"
-                    )
-                    st.success("PDF Generated! Click the download button above.")
+                    st.download_button(label="⬇️ Download PDF", data=pdf_bytes, file_name=f"Invoice_{qb_invoice_num}.pdf", mime="application/pdf")
+                    st.success("PDF Generated!")
 
             st.write("---")
-            st.warning("⚠️ Clicking below will remove these entries from future invoices.")
+            st.warning("⚠️ Finalizing will lock these entries.")
             if st.button("Finalize & Mark as Billed"):
                 if not qb_invoice_num:
-                    st.error("Please enter a QuickBooks Invoice # before finalizing.")
+                    st.error("Enter a QuickBooks Invoice # first.")
                 else:
-                    success = mark_entries_as_billed(preview_df["id"].tolist(), qb_invoice_num)
-                    if success:
-                        st.success(f"Invoice {qb_invoice_num} finalized! entries locked.")
+                    if mark_entries_as_billed(preview_df["id"].tolist(), qb_invoice_num):
+                        st.success(f"Invoice {qb_invoice_num} finalized!")
                         st.cache_data.clear()
         else:
-            st.info("No unbilled entries found for this range.")
+            st.info("No unbilled entries found.")
 
 # --- TAB 4: FINANCIAL FORECASTING ---
 with tab_finance:
@@ -373,143 +435,71 @@ with tab_finance:
         
         if not rev_df.empty:
             all_projects = rev_df["Project"].unique().tolist()
-            selected_projects = st.multiselect("Include Projects in Forecast", options=all_projects, default=all_projects)
-            
+            selected_projects = st.multiselect("Include Projects", options=all_projects, default=all_projects)
             filtered_df = rev_df[rev_df["Project"].isin(selected_projects)]
             
             if not filtered_df.empty:
-                total_rev = filtered_df["Amount"].sum()
-                total_hours = filtered_df["Hours"].sum()
-                
                 st.markdown("### Projected Revenue")
                 m1, m2 = st.columns(2)
-                m1.metric("Total Billable Amount", f"${total_rev:,.2f}")
-                m2.metric("Billable Hours", f"{total_hours:.2f}")
+                m1.metric("Total Billable Amount", f"${filtered_df['Amount'].sum():,.2f}")
+                m2.metric("Billable Hours", f"{filtered_df['Hours'].sum():.2f}")
                 
-                st.markdown("#### Breakdown by Project")
                 summary = filtered_df.groupby("Project")[["Hours", "Amount"]].sum().reset_index()
                 summary["Amount"] = summary["Amount"].apply(lambda x: f"${x:,.2f}") 
                 st.dataframe(summary, use_container_width=True)
-            else:
-                st.warning("No projects selected.")
-            
         else:
-            st.info("No unbilled time found in this period.")
+            st.info("No unbilled time found.")
 
 # --- TAB 5: MANAGE PROJECTS ---
 with tab_manage:
     st.header("Project Administration")
-    
     clients_df = get_all_clients()
-    # Fetch all projects (including archived) for editing
     all_projects_response = supabase.table("projects").select("*, clients(name)").order("name").execute()
     all_projects_df = pd.DataFrame(all_projects_response.data)
 
-    # UPDATED: Added "Manage POs" to the list
     tab_create, tab_edit, tab_po = st.tabs(["New Project", "Edit / Archive", "Manage POs"])
 
-    # SUB-TAB: CREATE
     with tab_create:
-        st.subheader("Create New Project")
         if not clients_df.empty:
             with st.form("create_project_form"):
                 client_map = {row['name']: row['id'] for i, row in clients_df.iterrows()}
                 c_name = st.selectbox("Client", options=list(client_map.keys()))
-                p_name = st.text_input("Project Name", placeholder="e.g. 25 FY Leadership Ops")
-                
-                c1, c2 = st.columns(2)
-                p_start = c1.date_input("LOA Start", value=date.today())
-                p_end = c2.date_input("LOA End", value=date.today() + timedelta(days=365))
-                
-                c3, c4 = st.columns(2)
-                p_budget = c3.number_input("Budget (Days)", min_value=0.0, step=0.5)
-                p_rate = c4.number_input("Daily Rate ($)", min_value=0.0, step=50.0)
-                
+                p_name = st.text_input("Project Name")
+                p_start = st.date_input("LOA Start", value=date.today())
+                p_end = st.date_input("LOA End", value=date.today() + timedelta(days=365))
+                p_budget = st.number_input("Budget (Days)", min_value=0.0, step=0.5)
+                p_rate = st.number_input("Daily Rate ($)", min_value=0.0, step=50.0)
                 if st.form_submit_button("Create Project"):
-                    if not p_name:
-                        st.error("Project Name is required.")
-                    else:
-                        create_project(client_map[c_name], p_name, p_start, p_end, p_budget, p_rate)
-        else:
-            st.warning("No clients found. Please add clients in Supabase first.")
+                    create_project(client_map[c_name], p_name, p_start, p_end, p_budget, p_rate)
 
-    # SUB-TAB: EDIT
     with tab_edit:
-        st.subheader("Edit or Archive Project")
         if not all_projects_df.empty:
-            # Dropdown to select project
-            all_projects_df["display_name"] = all_projects_df.apply(
-                lambda x: f"{'🔴' if not x['active'] else '🟢'} {x['clients']['name']} | {x['name']}", axis=1
-            )
+            all_projects_df["display_name"] = all_projects_df.apply(lambda x: f"{'🔴' if not x['active'] else '🟢'} {x['clients']['name']} | {x['name']}", axis=1)
             proj_map = {row['display_name']: row for i, row in all_projects_df.iterrows()}
-            
-            selected_proj_label = st.selectbox("Select Project to Edit", options=list(proj_map.keys()))
+            selected_proj_label = st.selectbox("Select Project", options=list(proj_map.keys()))
             proj_data = proj_map[selected_proj_label]
             
-            # Edit Form
             with st.form("edit_project_form"):
                 new_name = st.text_input("Project Name", value=proj_data['name'])
-                
-                c1, c2 = st.columns(2)
-                # Parse dates safely
-                d_start = date.fromisoformat(proj_data['loa_start'])
-                d_end = date.fromisoformat(proj_data['loa_end'])
-                
-                new_start = c1.date_input("LOA Start", value=d_start)
-                new_end = c2.date_input("LOA End", value=d_end)
-                
-                c3, c4 = st.columns(2)
-                new_budget = c3.number_input("Budget (Days)", value=float(proj_data['loa_budget_days']), step=0.5)
-                new_rate = c4.number_input("Daily Rate ($)", value=float(proj_data['daily_rate']), step=50.0)
-                
-                # STATUS TOGGLE
-                st.markdown("---")
-                is_active = st.checkbox("Project is Active", value=proj_data['active'], help="Uncheck to Archive this project (Remove from menus)")
-                
+                new_start = st.date_input("LOA Start", value=date.fromisoformat(proj_data['loa_start']))
+                new_end = st.date_input("LOA End", value=date.fromisoformat(proj_data['loa_end']))
+                new_budget = st.number_input("Budget (Days)", value=float(proj_data['loa_budget_days']))
+                new_rate = st.number_input("Daily Rate ($)", value=float(proj_data['daily_rate']))
+                is_active = st.checkbox("Active", value=proj_data['active'])
                 if st.form_submit_button("Update Project"):
-                    updates = {
-                        "name": new_name,
-                        "loa_start": str(new_start),
-                        "loa_end": str(new_end),
-                        "loa_budget_days": new_budget,
-                        "daily_rate": new_rate,
-                        "active": is_active
-                    }
-                    update_project(proj_data['id'], updates)
-        else:
-            st.info("No projects found.")
+                    update_project(proj_data['id'], {"name": new_name, "loa_start": str(new_start), "loa_end": str(new_end), "loa_budget_days": new_budget, "daily_rate": new_rate, "active": is_active})
 
-    # SUB-TAB: PURCHASE ORDERS (New!)
     with tab_po:
-        st.subheader("Manage Purchase Orders (Sub-Projects)")
         if not all_projects_df.empty:
-            # Re-use the display logic from Edit tab
-            all_projects_df["display_name"] = all_projects_df.apply(
-                lambda x: f"{x['clients']['name']} | {x['name']}", axis=1
-            )
+            all_projects_df["display_name"] = all_projects_df.apply(lambda x: f"{x['clients']['name']} | {x['name']}", axis=1)
             po_proj_map = {row['display_name']: row['id'] for i, row in all_projects_df.iterrows()}
+            sel_po_proj = st.selectbox("Select Project", options=list(po_proj_map.keys()), key="po_proj_select")
             
-            selected_po_proj_label = st.selectbox("Select Project", options=list(po_proj_map.keys()), key="po_proj_select")
-            selected_po_proj_id = po_proj_map[selected_po_proj_label]
-            
-            # Show existing POs
-            current_pos = fetch_pos_for_project(selected_po_proj_id)
+            current_pos = fetch_pos_for_project(po_proj_map[sel_po_proj])
             if current_pos:
-                st.write("**Existing POs:**")
-                for po in current_pos:
-                    st.text(f"• {po['po_number']}")
-            else:
-                st.info("No POs assigned to this project yet.")
+                for po in current_pos: st.text(f"• {po['po_number']}")
             
-            st.write("---")
-            
-            # Add New PO Form
             with st.form("add_po_form"):
-                new_po_num = st.text_input("New PO Number / Name", placeholder="e.g. PO #123456 or 'Training Budget'")
-                if st.form_submit_button("Add Purchase Order"):
-                    if new_po_num:
-                        create_purchase_order(selected_po_proj_id, new_po_num)
-                    else:
-                        st.error("Please enter a PO Number.")
-        else:
-            st.info("Create a project first.")
+                new_po_num = st.text_input("New PO Number")
+                if st.form_submit_button("Add PO"):
+                    create_purchase_order(po_proj_map[sel_po_proj], new_po_num)
