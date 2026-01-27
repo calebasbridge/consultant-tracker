@@ -5,7 +5,6 @@ import os
 class PDF(FPDF):
     def header(self):
         # Logo: Add the image to the top left
-        # Make sure 'logo.png' is in the same folder as this script
         if os.path.exists("logo.png"):
             self.image("logo.png", x=10, y=8, w=50)
         
@@ -123,10 +122,17 @@ def generate_invoice_pdf(project_name, invoice_num, start_date, end_date,
         pdf.cell(30, 7, f"${amount:,.2f}", border=1, align='R')
         pdf.ln()
         
-    # Footer Total
+    # Footer Totals
     pdf.set_font('Arial', 'B', 9)
     pdf.cell(130, 8, "TOTALS FOR THIS PERIOD:", border=0, align='R')
     pdf.cell(25, 8, f"{current_hours:.2f} Hours", border=1, align='R')
     pdf.cell(30, 8, f"${invoice_total_amount:,.2f}", border=1, align='R')
+    
+    # Second Footer line for government audit (Days equivalent)
+    pdf.ln(8)
+    pdf.cell(130, 8, "EQUIVALENT BILLABLE DAYS (8h/day):", border=0, align='R')
+    pdf.cell(25, 8, f"{current_hours / 8.0:.4f}", border=1, align='R')
+    pdf.cell(30, 8, "", border=0)
 
-    return pdf.output(dest='S').encode('latin-1')
+    # Updated return for fpdf2 compatibility: No dest='S'
+    return pdf.output()
