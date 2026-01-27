@@ -87,6 +87,7 @@ def delete_time_entry(entry_id):
 
 def get_entries_by_date(target_date):
     """Fetches entries for a specific date (Daily Snapshot)."""
+    # Updated to include IDs and billed status for Edit/Delete logic
     response = supabase.table("time_entries")\
         .select("*, projects(name, clients(name)), purchase_orders(po_number)")\
         .eq("date_worked", str(target_date))\
@@ -202,6 +203,7 @@ with tab_entry:
         if st.session_state.editing_entry_id:
             st.warning("⚠️ Edit in progress. Save or Cancel before changing dates.")
     
+    # Daily Snapshot with Edit/Delete buttons
     daily_df = get_entries_by_date(date_input)
     if not daily_df.empty:
         total_day_hours = daily_df["hours"].sum()
@@ -231,8 +233,10 @@ with tab_entry:
     
     st.write("---")
     
+    # ENTRY / EDIT FORM
     if not projects_df.empty:
         project_options = {f"{row['clients']['name']} | {row['name']}": row['id'] for index, row in projects_df.iterrows()}
+        
         is_editing = st.session_state.editing_entry_id is not None
         edit_vals = st.session_state.edit_data
         
@@ -241,6 +245,7 @@ with tab_entry:
         with st.form("time_entry_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
+                # Find index of current project if editing
                 default_ix = 0
                 if is_editing:
                     proj_label = f"{edit_vals['Client']} | {edit_vals['Project']}"
@@ -293,6 +298,7 @@ with tab_entry:
 # --- TAB 2: DASHBOARD ---
 with tab_dashboard:
     st.header("Project Overview")
+    
     view_mode = st.radio("Display Units:", ["Days", "Hours", "Both"], horizontal=True)
     st.write("---")
 
@@ -302,20 +308,26 @@ with tab_dashboard:
     if not projects_df.empty:
         dashboard_data = pd.merge(projects_df, usage_df, left_on="id", right_on="project_id", how="left")
         dashboard_data["total_hours"] = dashboard_data["total_hours"].fillna(0.0)
+        
         dashboard_data["days_used"] = dashboard_data["total_hours"] / 8.0
         dashboard_data["budget_remaining_days"] = dashboard_data["loa_budget_days"] - dashboard_data["days_used"]
         dashboard_data["budget_remaining_hours"] = dashboard_data["budget_remaining_days"] * 8.0
         dashboard_data["budget_total_hours"] = dashboard_data["loa_budget_days"] * 8.0
+        
         dashboard_data["client_name"] = dashboard_data["clients"].apply(lambda x: x.get("name", "Unknown") if isinstance(x, dict) else "Unknown")
 
         for index, row in dashboard_data.iterrows():
             st.subheader(f"{row['client_name']} | {row['name']}")
             
             if view_mode == "Days":
-                cap_label, used_label, rem_label = f"{row['loa_budget_days']:.2f} Days", f"{row['days_used']:.2f} Days", f"{row['budget_remaining_days']:.2f} Days"
+                cap_label = f"{row['loa_budget_days']:.2f} Days"
+                used_label = f"{row['days_used']:.2f} Days"
+                rem_label = f"{row['budget_remaining_days']:.2f} Days"
             elif view_mode == "Hours":
-                cap_label, used_label, rem_label = f"{row['budget_total_hours']:.2f} Hours", f"{row['total_hours']:.2f} Hours", f"{row['budget_remaining_hours']:.2f} Hours"
-            else:
+                cap_label = f"{row['budget_total_hours']:.2f} Hours"
+                used_label = f"{row['total_hours']:.2f} Hours"
+                rem_label = f"{row['budget_remaining_hours']:.2f} Hours"
+            else: # Both
                 cap_label = f"{row['loa_budget_days']:.2f} D / {row['budget_total_hours']:.1f} H"
                 used_label = f"{row['days_used']:.2f} D / {row['total_hours']:.1f} H"
                 rem_label = f"{row['budget_remaining_days']:.2f} D / {row['budget_remaining_hours']:.1f} H"
@@ -337,6 +349,7 @@ with tab_dashboard:
 with tab_invoice:
     st.header("Generate Invoice")
     col1, col2 = st.columns(2)
+    
     inv_projects_df = get_active_projects()
     inv_project_id = None
     
@@ -349,6 +362,7 @@ with tab_invoice:
             inv_selected_label = st.selectbox("Select Project for Invoice", options=list(inv_project_options.keys()))
             if inv_selected_label:
                 inv_project_id = inv_project_options[inv_selected_label]
+                
         qb_invoice_num = st.text_input("QuickBooks Invoice #", placeholder="e.g. 1099")
 
     with col2:
@@ -363,13 +377,7 @@ with tab_invoice:
             st.dataframe(preview_df[["date_worked", "description", "PO", "hours"]], use_container_width=True)
             
             total_inv_hours = preview_df["hours"].sum()
-            
-            # --- UPDATED METRICS SECTION ---
-            m_col1, m_col2 = st.columns(2)
-            with m_col1:
-                st.metric("Total Invoice Hours", f"{total_inv_hours:.2f} Hours")
-            with m_col2:
-                st.metric("Total Invoice Days", f"{total_inv_hours / 8.0:.2f} Days")
+            st.metric("Total Invoice Days", f"{total_inv_hours / 8.0:.2f} Days")
             
             st.write("---")
             if st.button("Generate Invoice PDF"):
@@ -382,7 +390,7 @@ with tab_invoice:
                     prior_days = prior_hours / 8.0
                     line_items = preview_df.to_dict('records')
                     
-                    pdf_bytes_raw = generate_invoice_pdf(
+                    pdf_bytes = generate_invoice_pdf(
                         project_name=inv_selected_label.split(" | ")[1], 
                         invoice_num=qb_invoice_num, 
                         start_date=start_date, 
@@ -396,15 +404,7 @@ with tab_invoice:
                         line_items=line_items
                     )
                     
-                    # Ensure compatibility with download button by casting to bytes
-                    pdf_bytes = bytes(pdf_bytes_raw)
-                    
-                    st.download_button(
-                        label="⬇️ Download PDF", 
-                        data=pdf_bytes, 
-                        file_name=f"Invoice_{qb_invoice_num}.pdf", 
-                        mime="application/pdf"
-                    )
+                    st.download_button(label="⬇️ Download PDF", data=pdf_bytes, file_name=f"Invoice_{qb_invoice_num}.pdf", mime="application/pdf")
                     st.success("PDF Generated!")
 
             st.write("---")
@@ -422,23 +422,28 @@ with tab_invoice:
 # --- TAB 4: FINANCIAL FORECASTING ---
 with tab_finance:
     st.header("Cash Flow & Billing Planner")
+    
     c1, c2 = st.columns(2)
     with c1:
-        today, first = date.today(), date.today().replace(day=1)
+        today = date.today()
+        first = today.replace(day=1)
         forecast_range = st.date_input("Billing Period", value=(first, today), key="finance_range")
     
     if isinstance(forecast_range, tuple) and len(forecast_range) == 2:
         f_start, f_end = forecast_range
         rev_df = get_revenue_projection(f_start, f_end)
+        
         if not rev_df.empty:
             all_projects = rev_df["Project"].unique().tolist()
             selected_projects = st.multiselect("Include Projects", options=all_projects, default=all_projects)
             filtered_df = rev_df[rev_df["Project"].isin(selected_projects)]
+            
             if not filtered_df.empty:
                 st.markdown("### Projected Revenue")
                 m1, m2 = st.columns(2)
                 m1.metric("Total Billable Amount", f"${filtered_df['Amount'].sum():,.2f}")
                 m2.metric("Billable Hours", f"{filtered_df['Hours'].sum():.2f}")
+                
                 summary = filtered_df.groupby("Project")[["Hours", "Amount"]].sum().reset_index()
                 summary["Amount"] = summary["Amount"].apply(lambda x: f"${x:,.2f}") 
                 st.dataframe(summary, use_container_width=True)
@@ -451,6 +456,7 @@ with tab_manage:
     clients_df = get_all_clients()
     all_projects_response = supabase.table("projects").select("*, clients(name)").order("name").execute()
     all_projects_df = pd.DataFrame(all_projects_response.data)
+
     tab_create, tab_edit, tab_po = st.tabs(["New Project", "Edit / Archive", "Manage POs"])
 
     with tab_create:
@@ -458,9 +464,11 @@ with tab_manage:
             with st.form("create_project_form"):
                 client_map = {row['name']: row['id'] for i, row in clients_df.iterrows()}
                 c_name = st.selectbox("Client", options=list(client_map.keys()))
-                p_name, p_start = st.text_input("Project Name"), st.date_input("LOA Start", value=date.today())
+                p_name = st.text_input("Project Name")
+                p_start = st.date_input("LOA Start", value=date.today())
                 p_end = st.date_input("LOA End", value=date.today() + timedelta(days=365))
-                p_budget, p_rate = st.number_input("Budget (Days)", min_value=0.0, step=0.5), st.number_input("Daily Rate ($)", min_value=0.0, step=50.0)
+                p_budget = st.number_input("Budget (Days)", min_value=0.0, step=0.5)
+                p_rate = st.number_input("Daily Rate ($)", min_value=0.0, step=50.0)
                 if st.form_submit_button("Create Project"):
                     create_project(client_map[c_name], p_name, p_start, p_end, p_budget, p_rate)
 
@@ -470,10 +478,13 @@ with tab_manage:
             proj_map = {row['display_name']: row for i, row in all_projects_df.iterrows()}
             selected_proj_label = st.selectbox("Select Project", options=list(proj_map.keys()))
             proj_data = proj_map[selected_proj_label]
+            
             with st.form("edit_project_form"):
                 new_name = st.text_input("Project Name", value=proj_data['name'])
-                new_start, new_end = st.date_input("LOA Start", value=date.fromisoformat(proj_data['loa_start'])), st.date_input("LOA End", value=date.fromisoformat(proj_data['loa_end']))
-                new_budget, new_rate = st.number_input("Budget (Days)", value=float(proj_data['loa_budget_days'])), st.number_input("Daily Rate ($)", value=float(proj_data['daily_rate']))
+                new_start = st.date_input("LOA Start", value=date.fromisoformat(proj_data['loa_start']))
+                new_end = st.date_input("LOA End", value=date.fromisoformat(proj_data['loa_end']))
+                new_budget = st.number_input("Budget (Days)", value=float(proj_data['loa_budget_days']))
+                new_rate = st.number_input("Daily Rate ($)", value=float(proj_data['daily_rate']))
                 is_active = st.checkbox("Active", value=proj_data['active'])
                 if st.form_submit_button("Update Project"):
                     update_project(proj_data['id'], {"name": new_name, "loa_start": str(new_start), "loa_end": str(new_end), "loa_budget_days": new_budget, "daily_rate": new_rate, "active": is_active})
@@ -483,9 +494,11 @@ with tab_manage:
             all_projects_df["display_name"] = all_projects_df.apply(lambda x: f"{x['clients']['name']} | {x['name']}", axis=1)
             po_proj_map = {row['display_name']: row['id'] for i, row in all_projects_df.iterrows()}
             sel_po_proj = st.selectbox("Select Project", options=list(po_proj_map.keys()), key="po_proj_select")
+            
             current_pos = fetch_pos_for_project(po_proj_map[sel_po_proj])
             if current_pos:
                 for po in current_pos: st.text(f"• {po['po_number']}")
+            
             with st.form("add_po_form"):
                 new_po_num = st.text_input("New PO Number")
                 if st.form_submit_button("Add PO"):
