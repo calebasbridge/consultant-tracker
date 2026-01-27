@@ -109,18 +109,38 @@ def generate_invoice_pdf(project_name, invoice_num, start_date, end_date,
         hours = float(item['hours'])
         amount = hours * hourly_rate
         po_name = item['PO'] if item['PO'] else "General"
-        
-        pdf.cell(25, 7, item['date_worked'], border=1)
-        
-        # Handle long descriptions
-        x = pdf.get_x()
-        y = pdf.get_y()
-        pdf.multi_cell(75, 7, item['description'], border=1, align='L')
-        pdf.set_xy(x + 75, y) # Reset position to right of description
-        
-        pdf.cell(30, 7, po_name, border=1)
-        pdf.cell(25, 7, f"{hours:.2f}", border=1, align='R')
-        pdf.cell(30, 7, f"${amount:,.2f}", border=1, align='R')
+    
+        # Calculate how many lines the description will need
+        description_text = item['description']
+        cell_width = 75
+        num_lines = pdf.multi_cell(cell_width, 7, description_text, border=0, align='L', split_only=True)
+        line_height = 7
+        cell_height = len(num_lines) * line_height
+    
+        # Check if we need a new page (if cell would extend past bottom margin)
+        if pdf.get_y() + cell_height > pdf.page_break_trigger:
+            pdf.add_page()
+            # Redraw table headers after page break
+            pdf.set_font('Arial', 'B', 9)
+            pdf.cell(25, 8, "Date", border=1)
+            pdf.cell(75, 8, "Description", border=1)
+            pdf.cell(30, 8, "Sub-Project (PO)", border=1)
+            pdf.cell(25, 8, "Hours", border=1, align='R')
+            pdf.cell(30, 8, "Amount", border=1, align='R')
+            pdf.ln()
+            pdf.set_font('Arial', '', 8)
+    
+        # Store starting position
+        x_start = pdf.get_x()
+        y_start = pdf.get_y()
+    
+        # Draw all cells with the calculated height
+        pdf.cell(25, cell_height, item['date_worked'], border=1)
+        pdf.multi_cell(75, line_height, description_text, border=1, align='L')
+        pdf.set_xy(x_start + 100, y_start)
+        pdf.cell(30, cell_height, po_name, border=1)
+        pdf.cell(25, cell_height, f"{hours:.2f}", border=1, align='R')
+        pdf.cell(30, cell_height, f"${amount:,.2f}", border=1, align='R')
         pdf.ln()
         
     # Footer Total
@@ -129,4 +149,4 @@ def generate_invoice_pdf(project_name, invoice_num, start_date, end_date,
     pdf.cell(25, 8, f"{current_hours:.2f} Hours", border=1, align='R')
     pdf.cell(30, 8, f"${invoice_total_amount:,.2f}", border=1, align='R')
 
-    return pdf.output(dest='S').encode('latin-1')
+    return bytes(pdf.output(dest='S'))

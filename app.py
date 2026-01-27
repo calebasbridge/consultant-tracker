@@ -377,7 +377,7 @@ with tab_invoice:
             st.dataframe(preview_df[["date_worked", "description", "PO", "hours"]], use_container_width=True)
             
             total_inv_hours = preview_df["hours"].sum()
-            st.metric("Total Invoice Days", f"{total_inv_hours / 8.0:.2f} Days")
+            st.metric("Total Invoice Days", f"{total_inv_hours / 8.0:.2f} Days ({total_inv_hours:.2f} Hours)")
             
             st.write("---")
             if st.button("Generate Invoice PDF"):
