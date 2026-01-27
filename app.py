@@ -382,7 +382,7 @@ with tab_invoice:
                     prior_days = prior_hours / 8.0
                     line_items = preview_df.to_dict('records')
                     
-                    pdf_bytes = generate_invoice_pdf(
+                    pdf_bytes_raw = generate_invoice_pdf(
                         project_name=inv_selected_label.split(" | ")[1], 
                         invoice_num=qb_invoice_num, 
                         start_date=start_date, 
@@ -396,7 +396,15 @@ with tab_invoice:
                         line_items=line_items
                     )
                     
-                    st.download_button(label="⬇️ Download PDF", data=pdf_bytes, file_name=f"Invoice_{qb_invoice_num}.pdf", mime="application/pdf")
+                    # Ensure compatibility with download button by casting to bytes
+                    pdf_bytes = bytes(pdf_bytes_raw)
+                    
+                    st.download_button(
+                        label="⬇️ Download PDF", 
+                        data=pdf_bytes, 
+                        file_name=f"Invoice_{qb_invoice_num}.pdf", 
+                        mime="application/pdf"
+                    )
                     st.success("PDF Generated!")
 
             st.write("---")
